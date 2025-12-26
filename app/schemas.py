@@ -93,9 +93,11 @@ class DemoWatermarkResponse(BaseModel):
 
 class PaymentCreate(BaseModel):
     user_id: UUID
+    order_id: Optional[UUID] = None
     status: str = Field(min_length=1, max_length=50)
     stripe_customer_id: Optional[str] = Field(default=None, max_length=255)
     stripe_session_id: Optional[str] = Field(default=None, max_length=255)
+    stripe_payment_intent_id: Optional[str] = Field(default=None, max_length=255)
     amount_cents: Optional[int] = Field(default=None, ge=0)
     currency: Optional[str] = Field(default=None, max_length=10)
 
@@ -105,9 +107,33 @@ class PaymentRead(BaseModel):
 
     id: UUID
     user_id: UUID
+    order_id: Optional[UUID]
     status: str
     stripe_customer_id: Optional[str]
     stripe_session_id: Optional[str]
+    stripe_payment_intent_id: Optional[str]
     amount_cents: Optional[int]
     currency: Optional[str]
     created_at: datetime
+
+
+class OrderRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    user_id: UUID
+    status: str
+    note: Optional[str]
+    image_count: int
+    amount_cents: int
+    currency: str
+    stripe_session_id: Optional[str]
+    created_at: datetime
+
+
+class OrderCheckoutResponse(BaseModel):
+    order_id: UUID
+    checkout_url: str
+    amount_cents: int
+    currency: str
+    image_count: int

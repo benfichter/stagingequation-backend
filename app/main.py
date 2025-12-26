@@ -2,7 +2,7 @@ from uuid import UUID
 
 import os
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
@@ -12,6 +12,7 @@ from app import models, schemas
 from app.db import get_db
 from app.gemini import build_staging_prompt, generate_staged_image
 from app.moge import infer_room_dimensions, is_moge_enabled
+from app.stripe_utils import get_checkout_urls, get_price_settings, get_stripe
 from app.storage import (
     build_object_key,
     build_staged_key,
@@ -248,3 +249,175 @@ def create_payment(payload: schemas.PaymentCreate, db: Session = Depends(get_db)
     db.commit()
     db.refresh(payment)
     return payment
+
+
+@app.post("/orders/checkout", response_model=schemas.OrderCheckoutResponse)
+async def create_order_checkout(
+    user_id: UUID = Form(...),
+    files: list[UploadFile] = File(...),
+    note: str | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    user = db.get(models.User, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="user not found")
+
+    if not files:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="at least one image is required")
+
+    uploads: list[models.Upload] = []
+    for file in files:
+        content_type = file.content_type or "application/octet-stream"
+        if not content_type.startswith("image/"):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="all files must be images")
+
+        contents = await file.read()
+        if not contents:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="empty file")
+
+        storage_key = build_object_key("orders", str(user_id), file.filename)
+        put_object_bytes(storage_key, contents, content_type)
+        upload = models.Upload(
+            user_id=user_id,
+            storage_url=get_storage_url(storage_key),
+            content_type=content_type,
+            original_filename=file.filename,
+            size_bytes=len(contents),
+            kind="order_original",
+        )
+        db.add(upload)
+        uploads.append(upload)
+
+    price_per_image, currency = get_price_settings()
+    image_count = len(uploads)
+    amount_cents = price_per_image * image_count
+
+    order = models.Order(
+        user_id=user_id,
+        status="pending_payment",
+        note=note.strip() if note else None,
+        image_count=image_count,
+        amount_cents=amount_cents,
+        currency=currency,
+    )
+    db.add(order)
+    db.flush()
+
+    for upload in uploads:
+        db.add(models.OrderItem(order_id=order.id, upload_id=upload.id))
+
+    stripe_client = get_stripe()
+    success_url, cancel_url = get_checkout_urls()
+    try:
+        session = stripe_client.checkout.Session.create(
+            mode="payment",
+            payment_method_types=["card"],
+            line_items=[
+                {
+                    "price_data": {
+                        "currency": currency,
+                        "product_data": {
+                            "name": "Virtual staging image",
+                            "description": "Per-image staging service",
+                        },
+                        "unit_amount": price_per_image,
+                    },
+                    "quantity": image_count,
+                }
+            ],
+            success_url=success_url,
+            cancel_url=cancel_url,
+            metadata={
+                "order_id": str(order.id),
+                "user_id": str(user_id),
+                "image_count": str(image_count),
+            },
+        )
+    except Exception as exc:  # stripe.error.StripeError is not imported here
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="stripe checkout failed") from exc
+
+    order.stripe_session_id = session.id
+    payment = models.Payment(
+        user_id=user_id,
+        order_id=order.id,
+        status="pending",
+        stripe_session_id=session.id,
+        amount_cents=amount_cents,
+        currency=currency,
+    )
+    db.add(payment)
+    db.commit()
+    db.refresh(order)
+
+    return schemas.OrderCheckoutResponse(
+        order_id=order.id,
+        checkout_url=session.url,
+        amount_cents=amount_cents,
+        currency=currency,
+        image_count=image_count,
+    )
+
+
+@app.get("/orders/{order_id}", response_model=schemas.OrderRead)
+def get_order(order_id: UUID, db: Session = Depends(get_db)):
+    order = db.get(models.Order, order_id)
+    if not order:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
+    return order
+
+
+@app.post("/stripe/webhook")
+async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+    if not sig_header:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="missing stripe signature")
+
+    stripe_client = get_stripe()
+    webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
+    if not webhook_secret:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="webhook secret not set")
+
+    try:
+        event = stripe_client.Webhook.construct_event(payload, sig_header, webhook_secret)
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid webhook signature") from exc
+
+    event_type = event.get("type")
+    data_object = event.get("data", {}).get("object", {})
+
+    if event_type == "checkout.session.completed":
+        session_id = data_object.get("id")
+        metadata = data_object.get("metadata") or {}
+        order_id = metadata.get("order_id")
+        if order_id:
+            try:
+                order_uuid = UUID(order_id)
+            except ValueError:
+                order_uuid = None
+            if order_uuid:
+                order = db.get(models.Order, order_uuid)
+                if order:
+                    order.status = "paid"
+                    order.stripe_session_id = session_id
+                    order.stripe_payment_intent_id = data_object.get("payment_intent")
+
+        payment = db.scalar(select(models.Payment).where(models.Payment.stripe_session_id == session_id))
+        if payment:
+            payment.status = "paid"
+            payment.stripe_customer_id = data_object.get("customer")
+            payment.stripe_payment_intent_id = data_object.get("payment_intent")
+        db.commit()
+
+    elif event_type == "checkout.session.expired":
+        session_id = data_object.get("id")
+        payment = db.scalar(select(models.Payment).where(models.Payment.stripe_session_id == session_id))
+        if payment:
+            payment.status = "expired"
+        order = db.scalar(select(models.Order).where(models.Order.stripe_session_id == session_id))
+        if order:
+            order.status = "expired"
+        db.commit()
+
+    return {"received": True}

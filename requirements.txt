@@ -10,3 +10,4 @@ boto3>=1.34
 python-multipart>=0.0.9
 Pillow>=10.2
 httpx>=0.27
+stripe>=10.10
