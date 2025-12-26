@@ -74,9 +74,21 @@ class UploadConfirm(BaseModel):
     size_bytes: Optional[int] = Field(default=None, ge=0)
 
 
+class RoomDimensions(BaseModel):
+    width: float
+    depth: float
+    height: float
+    area: float
+    unit: str = "m"
+    calibration_factor: Optional[float] = None
+
+
 class DemoWatermarkResponse(BaseModel):
     original: UploadRead
     staged: UploadRead
+    dimensions: Optional[RoomDimensions] = None
+    ceiling_overlay_base64: Optional[str] = None
+    ceiling_corners: Optional[list[list[int]]] = None
 
 
 class PaymentCreate(BaseModel):

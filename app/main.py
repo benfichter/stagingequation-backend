@@ -1,12 +1,14 @@
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import models, schemas
 from app.db import get_db
 from app.gemini import build_staging_prompt, generate_staged_image
+from app.moge import infer_room_dimensions, is_moge_enabled
 from app.storage import (
     build_object_key,
     build_staged_key,
@@ -118,6 +120,7 @@ async def demo_watermark(
     prompt: str | None = Form(None),
     room_type: str | None = Form(None),
     style: str | None = Form(None),
+    calibration_height_m: float | None = Form(None),
     db: Session = Depends(get_db),
 ):
     user = db.get(models.User, user_id)
@@ -131,6 +134,28 @@ async def demo_watermark(
     contents = await file.read()
     if not contents:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="empty file")
+
+    dimensions = None
+    ceiling_overlay_base64 = None
+    ceiling_corners = None
+    if is_moge_enabled():
+        try:
+            moge_payload = await run_in_threadpool(
+                infer_room_dimensions, contents, calibration_height_m
+            )
+            if moge_payload:
+                dimensions = (
+                    moge_payload.get("dimensions")
+                    if isinstance(moge_payload, dict) and "dimensions" in moge_payload
+                    else moge_payload
+                )
+                if isinstance(moge_payload, dict):
+                    ceiling_overlay_base64 = moge_payload.get("ceiling_overlay_base64")
+                    ceiling_corners = moge_payload.get("ceiling_corners")
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
     original_key = build_object_key("uploads", str(user_id), file.filename)
     put_object_bytes(original_key, contents, content_type)
@@ -189,7 +214,13 @@ async def demo_watermark(
         update={"download_url": staged_download_url}
     )
 
-    return schemas.DemoWatermarkResponse(original=original_read, staged=staged_read)
+    return schemas.DemoWatermarkResponse(
+        original=original_read,
+        staged=staged_read,
+        dimensions=schemas.RoomDimensions.model_validate(dimensions) if dimensions else None,
+        ceiling_overlay_base64=ceiling_overlay_base64,
+        ceiling_corners=ceiling_corners,
+    )
 
 
 @app.post("/payments", response_model=schemas.PaymentRead, status_code=status.HTTP_201_CREATED)
