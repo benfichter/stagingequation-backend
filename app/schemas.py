@@ -150,3 +150,7 @@ class OrderCheckoutResponse(BaseModel):
     amount_cents: int
     currency: str
     image_count: int
+
+
+class OrderCheckoutLink(BaseModel):
+    checkout_url: str

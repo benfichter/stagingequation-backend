@@ -429,6 +429,33 @@ def get_order(order_id: UUID, db: Session = Depends(get_db)):
     return schemas.OrderRead.model_validate(order).model_copy(update={"uploads": uploads})
 
 
+@app.post("/orders/{order_id}/checkout", response_model=schemas.OrderCheckoutLink)
+def resume_order_checkout(order_id: UUID, db: Session = Depends(get_db)):
+    order = db.get(models.Order, order_id)
+    if not order:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
+
+    if order.status != "pending_payment":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="order is not pending payment")
+
+    if not order.stripe_session_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="no checkout session available")
+
+    stripe_client = get_stripe()
+    try:
+        session = stripe_client.checkout.Session.retrieve(order.stripe_session_id)
+    except Exception as exc:  # stripe.error.StripeError is not imported here
+        logger.exception("Stripe checkout retrieval failed")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=f"stripe checkout retrieval failed: {exc}"
+        ) from exc
+
+    if not session.url:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="checkout session is not available")
+
+    return schemas.OrderCheckoutLink(checkout_url=session.url)
+
+
 @app.post("/stripe/webhook")
 async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
     payload = await request.body()
