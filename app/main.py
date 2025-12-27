@@ -1,5 +1,6 @@
 from uuid import UUID
 
+import logging
 import os
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
@@ -24,6 +25,7 @@ from app.storage import (
 from app.watermark import apply_watermark
 
 app = FastAPI(title="Staging Equation API")
+logger = logging.getLogger(__name__)
 
 cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
 allowed_origins = [origin.strip() for origin in cors_origins.split(",") if origin.strip()]
@@ -334,8 +336,11 @@ async def create_order_checkout(
             },
         )
     except Exception as exc:  # stripe.error.StripeError is not imported here
+        logger.exception("Stripe checkout failed")
         db.rollback()
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="stripe checkout failed") from exc
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=f"stripe checkout failed: {exc}"
+        ) from exc
 
     order.stripe_session_id = session.id
     payment = models.Payment(
