@@ -131,6 +131,18 @@ class OrderRead(BaseModel):
     created_at: datetime
 
 
+class OrderListItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    status: str
+    note: Optional[str]
+    image_count: int
+    amount_cents: int
+    currency: str
+    created_at: datetime
+
+
 class OrderCheckoutResponse(BaseModel):
     order_id: UUID
     checkout_url: str

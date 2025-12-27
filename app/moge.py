@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import os
 import threading
+import time
 from typing import Any
 
 import httpx
@@ -149,11 +151,99 @@ def _infer_remote(image_bytes: bytes, calibration_height_m: float | None) -> dic
     return payload
 
 
+def _runpod_config() -> tuple[str | None, str | None]:
+    return os.getenv("MOGE_RUNPOD_ENDPOINT_ID"), os.getenv("MOGE_RUNPOD_API_KEY")
+
+
+def _runpod_headers(api_key: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {api_key}"}
+
+
+def _runpod_timeout() -> float:
+    return float(os.getenv("MOGE_RUNPOD_TIMEOUT", "180"))
+
+
+def _runpod_poll_interval() -> float:
+    return float(os.getenv("MOGE_RUNPOD_POLL_INTERVAL", "2"))
+
+
+def _runpod_run(payload: dict[str, Any]) -> str:
+    endpoint_id, api_key = _runpod_config()
+    if not endpoint_id or not api_key:
+        raise RuntimeError("MOGE_RUNPOD_ENDPOINT_ID or MOGE_RUNPOD_API_KEY is not configured")
+
+    url = f"https://api.runpod.ai/v2/{endpoint_id}/run"
+    response = httpx.post(url, json=payload, headers=_runpod_headers(api_key), timeout=_runpod_timeout())
+    if response.status_code >= 400:
+        raise RuntimeError(f"RunPod run error: {response.status_code} {response.text}")
+
+    data = response.json()
+    job_id = data.get("id")
+    if not job_id:
+        raise RuntimeError("RunPod did not return a job id.")
+    return job_id
+
+
+def _runpod_poll(job_id: str) -> dict[str, Any]:
+    endpoint_id, api_key = _runpod_config()
+    if not endpoint_id or not api_key:
+        raise RuntimeError("MOGE_RUNPOD_ENDPOINT_ID or MOGE_RUNPOD_API_KEY is not configured")
+
+    url = f"https://api.runpod.ai/v2/{endpoint_id}/status/{job_id}"
+    deadline = time.monotonic() + _runpod_timeout()
+    interval = _runpod_poll_interval()
+
+    while time.monotonic() < deadline:
+        response = httpx.get(url, headers=_runpod_headers(api_key), timeout=_runpod_timeout())
+        if response.status_code >= 400:
+            raise RuntimeError(f"RunPod status error: {response.status_code} {response.text}")
+
+        data = response.json()
+        status_value = str(data.get("status") or "").upper()
+        if status_value in {"COMPLETED", "SUCCESS", "SUCCEEDED"}:
+            output = data.get("output")
+            if isinstance(output, dict):
+                return output
+            raise RuntimeError("RunPod returned an unexpected output payload.")
+        if status_value in {"FAILED", "CANCELLED", "TIMED_OUT"}:
+            raise RuntimeError(f"RunPod job failed: {data.get('error') or data}")
+
+        time.sleep(interval)
+
+    raise RuntimeError("RunPod job timed out.")
+
+
+def _infer_runpod(image_bytes: bytes, calibration_height_m: float | None) -> dict[str, Any]:
+    payload = {
+        "input": {
+            "image_base64": base64.b64encode(image_bytes).decode("ascii"),
+        }
+    }
+    if calibration_height_m:
+        payload["input"]["calibration_height_m"] = calibration_height_m
+
+    job_id = _runpod_run(payload)
+    return _runpod_poll(job_id)
+
+
+def request_moge_warmup() -> dict[str, Any]:
+    endpoint_id, api_key = _runpod_config()
+    if not endpoint_id or not api_key:
+        return {"status": "not_configured"}
+
+    payload = {"input": {"warm": True}}
+    job_id = _runpod_run(payload)
+    return {"status": "warming", "job_id": job_id}
+
+
 def infer_room_dimensions(
     image_bytes: bytes, calibration_height_m: float | None = None
 ) -> dict[str, Any] | None:
     if not is_moge_enabled():
         return None
+
+    if os.getenv("MOGE_RUNPOD_ENDPOINT_ID"):
+        return _infer_runpod(image_bytes, calibration_height_m)
 
     if os.getenv("MOGE_REMOTE_URL"):
         return _infer_remote(image_bytes, calibration_height_m)

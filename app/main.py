@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from app import models, schemas
 from app.db import get_db
 from app.gemini import build_staging_prompt, generate_staged_image
-from app.moge import infer_room_dimensions, is_moge_enabled
+from app.moge import infer_room_dimensions, is_moge_enabled, request_moge_warmup
 from app.stripe_utils import get_checkout_urls, get_price_settings, get_stripe
 from app.storage import (
     build_object_key,
@@ -63,6 +63,18 @@ def get_user(user_id: UUID, db: Session = Depends(get_db)):
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="user not found")
     return user
+
+
+@app.get("/users/{user_id}/orders", response_model=list[schemas.OrderListItem])
+def list_orders_for_user(user_id: UUID, db: Session = Depends(get_db)):
+    user = db.get(models.User, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="user not found")
+
+    orders = db.scalars(
+        select(models.Order).where(models.Order.user_id == user_id).order_by(models.Order.created_at.desc())
+    ).all()
+    return [schemas.OrderListItem.model_validate(order) for order in orders]
 
 
 @app.post("/uploads", response_model=schemas.UploadRead, status_code=status.HTTP_201_CREATED)
@@ -251,6 +263,17 @@ def create_payment(payload: schemas.PaymentCreate, db: Session = Depends(get_db)
     db.commit()
     db.refresh(payment)
     return payment
+
+
+@app.post("/moge/warm")
+def warm_moge():
+    if not is_moge_enabled():
+        return {"status": "disabled"}
+
+    try:
+        return request_moge_warmup()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
 
 @app.post("/orders/checkout", response_model=schemas.OrderCheckoutResponse)
