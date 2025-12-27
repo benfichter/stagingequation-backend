@@ -84,5 +84,10 @@ def send_order_notification(
             if username and password:
                 server.login(username, password)
             server.send_message(message)
+        logger.info(
+            "Order notification sent for order %s to %s recipient(s)",
+            order_id,
+            len(recipients),
+        )
     except Exception:
         logger.exception("Order notification failed")

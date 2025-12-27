@@ -129,6 +129,7 @@ class OrderRead(BaseModel):
     currency: str
     stripe_session_id: Optional[str]
     created_at: datetime
+    uploads: list[UploadRead] = Field(default_factory=list)
 
 
 class OrderListItem(BaseModel):

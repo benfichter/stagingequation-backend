@@ -408,7 +408,25 @@ def get_order(order_id: UUID, db: Session = Depends(get_db)):
     order = db.get(models.Order, order_id)
     if not order:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="order not found")
-    return order
+    items = db.scalars(
+        select(models.OrderItem)
+        .where(models.OrderItem.order_id == order_id)
+        .order_by(models.OrderItem.created_at.asc())
+    ).all()
+    uploads: list[schemas.UploadRead] = []
+    for item in items:
+        upload = item.upload
+        if not upload:
+            continue
+        download_url = None
+        if upload.storage_url.startswith("r2://"):
+            key_parts = upload.storage_url[len("r2://") :].split("/", 1)
+            if len(key_parts) == 2:
+                download_url = create_presigned_get_url(key_parts[1])
+        uploads.append(
+            schemas.UploadRead.model_validate(upload).model_copy(update={"download_url": download_url})
+        )
+    return schemas.OrderRead.model_validate(order).model_copy(update={"uploads": uploads})
 
 
 @app.post("/stripe/webhook")
