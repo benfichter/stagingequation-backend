@@ -1,5 +1,6 @@
 from uuid import UUID
 
+import asyncio
 import logging
 import os
 
@@ -167,27 +168,17 @@ async def demo_watermark(
     dimensions = None
     ceiling_overlay_base64 = None
     ceiling_corners = None
+    moge_task = None
     if is_moge_enabled():
-        try:
-            moge_payload = await run_in_threadpool(
-                infer_room_dimensions, contents, calibration_height_m
-            )
-            if moge_payload:
-                dimensions = (
-                    moge_payload.get("dimensions")
-                    if isinstance(moge_payload, dict) and "dimensions" in moge_payload
-                    else moge_payload
-                )
-                if isinstance(moge_payload, dict):
-                    ceiling_overlay_base64 = moge_payload.get("ceiling_overlay_base64")
-                    ceiling_corners = moge_payload.get("ceiling_corners")
-        except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-        except RuntimeError as exc:
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+        moge_task = asyncio.create_task(
+            run_in_threadpool(infer_room_dimensions, contents, calibration_height_m)
+        )
+
+    prompt_text = build_staging_prompt(prompt, room_type, style)
+    gemini_task = asyncio.create_task(generate_staged_image(contents, content_type, prompt_text))
 
     original_key = build_object_key("uploads", str(user_id), file.filename)
-    put_object_bytes(original_key, contents, content_type)
+    await run_in_threadpool(put_object_bytes, original_key, contents, content_type)
     original_upload = models.Upload(
         user_id=user_id,
         storage_url=get_storage_url(original_key),
@@ -199,9 +190,8 @@ async def demo_watermark(
     db.add(original_upload)
     db.flush()
 
-    prompt_text = build_staging_prompt(prompt, room_type, style)
     try:
-        generated_bytes = await generate_staged_image(contents, content_type, prompt_text)
+        generated_bytes = await gemini_task
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
@@ -209,12 +199,12 @@ async def demo_watermark(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Gemini returned no image data")
 
     try:
-        staged_bytes = apply_watermark(generated_bytes)
+        staged_bytes = await run_in_threadpool(apply_watermark, generated_bytes)
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Watermark failed") from exc
     staged_key = build_staged_key(str(user_id))
     staged_content_type = "image/jpeg"
-    put_object_bytes(staged_key, staged_bytes, staged_content_type)
+    await run_in_threadpool(put_object_bytes, staged_key, staged_bytes, staged_content_type)
     staged_upload = models.Upload(
         user_id=user_id,
         storage_url=get_storage_url(staged_key),
@@ -228,6 +218,21 @@ async def demo_watermark(
     db.commit()
     db.refresh(original_upload)
     db.refresh(staged_upload)
+
+    if moge_task:
+        try:
+            moge_payload = await moge_task
+            if moge_payload:
+                dimensions = (
+                    moge_payload.get("dimensions")
+                    if isinstance(moge_payload, dict) and "dimensions" in moge_payload
+                    else moge_payload
+                )
+                if isinstance(moge_payload, dict):
+                    ceiling_overlay_base64 = moge_payload.get("ceiling_overlay_base64")
+                    ceiling_corners = moge_payload.get("ceiling_corners")
+        except Exception as exc:
+            logger.warning("MoGe demo inference failed: %s", exc)
 
     original_download_url = None
     staged_download_url = None
