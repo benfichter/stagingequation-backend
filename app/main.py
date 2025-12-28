@@ -3,7 +3,7 @@ from uuid import UUID
 import logging
 import os
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
@@ -13,7 +13,6 @@ from app import models, schemas
 from app.db import get_db
 from app.gemini import build_staging_prompt, generate_staged_image
 from app.moge import infer_room_dimensions, is_moge_enabled, request_moge_warmup
-from app.notifications import send_order_notification
 from app.stripe_utils import get_checkout_urls, get_price_settings, get_stripe
 from app.storage import (
     build_object_key,
@@ -279,7 +278,6 @@ def warm_moge():
 
 @app.post("/orders/checkout", response_model=schemas.OrderCheckoutResponse)
 async def create_order_checkout(
-    background_tasks: BackgroundTasks,
     user_id: UUID = Form(...),
     files: list[UploadFile] = File(...),
     note: str | None = Form(None),
@@ -380,19 +378,6 @@ async def create_order_checkout(
     db.add(payment)
     db.commit()
     db.refresh(order)
-
-    background_tasks.add_task(
-        send_order_notification,
-        order_id=str(order.id),
-        user_id=str(user_id),
-        user_name=user.name,
-        user_email=user.email,
-        user_firm=user.firm_name,
-        image_count=image_count,
-        amount_cents=amount_cents,
-        currency=currency,
-        note=clean_note,
-    )
 
     return schemas.OrderCheckoutResponse(
         order_id=order.id,
