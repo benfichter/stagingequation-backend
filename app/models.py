@@ -17,6 +17,7 @@ class User(Base):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     email: Mapped[str] = mapped_column(String(320), nullable=False, unique=True, index=True)
     phone: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    password_hash: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     uploads: Mapped[List["Upload"]] = relationship(back_populates="user", cascade="all, delete-orphan")

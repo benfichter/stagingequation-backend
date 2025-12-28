@@ -24,6 +24,7 @@ from app.storage import (
     put_object_bytes,
 )
 from app.watermark import apply_watermark
+from app.security import hash_password, verify_password
 
 app = FastAPI(title="Staging Equation API")
 logger = logging.getLogger(__name__)
@@ -51,10 +52,26 @@ def create_user(payload: schemas.UserCreate, db: Session = Depends(get_db)):
     if existing:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="email already exists")
 
-    user = models.User(**payload.model_dump())
+    user = models.User(
+        firm_name=payload.firm_name,
+        name=payload.name,
+        email=payload.email,
+        phone=payload.phone,
+        password_hash=hash_password(payload.password),
+    )
     db.add(user)
     db.commit()
     db.refresh(user)
+    return user
+
+
+@app.post("/auth/login", response_model=schemas.UserRead)
+def login_user(payload: schemas.UserLogin, db: Session = Depends(get_db)):
+    user = db.scalar(select(models.User).where(models.User.email == payload.email))
+    if not user or not user.password_hash:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid credentials")
+    if not verify_password(payload.password, user.password_hash):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid credentials")
     return user
 
 

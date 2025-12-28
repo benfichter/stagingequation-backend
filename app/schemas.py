@@ -10,6 +10,7 @@ class UserCreate(BaseModel):
     firm_name: str = Field(min_length=1, max_length=200)
     name: str = Field(min_length=1, max_length=200)
     email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
     phone: Optional[str] = Field(default=None, max_length=50)
 
 
@@ -22,6 +23,11 @@ class UserRead(BaseModel):
     email: EmailStr
     phone: Optional[str]
     created_at: datetime
+
+
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=8, max_length=128)
 
 
 class UploadCreate(BaseModel):

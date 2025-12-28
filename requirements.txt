@@ -11,3 +11,4 @@ python-multipart>=0.0.9
 Pillow>=10.2
 httpx>=0.27
 stripe>=10.10
+passlib[bcrypt]>=1.7
