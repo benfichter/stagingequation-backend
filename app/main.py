@@ -14,6 +14,7 @@ from app import models, schemas
 from app.db import get_db
 from app.gemini import build_staging_prompt, generate_staged_image
 from app.moge import infer_room_dimensions, is_moge_enabled, request_moge_warmup
+from app.notifications import send_order_created_notification
 from app.stripe_utils import get_checkout_urls, get_price_settings, get_stripe
 from app.storage import (
     build_object_key,
@@ -410,6 +411,11 @@ async def create_order_checkout(
     db.commit()
     db.refresh(order)
 
+    try:
+        await run_in_threadpool(send_order_created_notification, order, user, uploads)
+    except Exception:
+        logger.exception("Order notification failed")
+
     return schemas.OrderCheckoutResponse(
         order_id=order.id,
         checkout_url=session.url,
@@ -504,7 +510,7 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
             if order_uuid:
                 order = db.get(models.Order, order_uuid)
                 if order:
-                    order.status = "paid"
+                    order.status = "creating"
                     order.stripe_session_id = session_id
                     order.stripe_payment_intent_id = data_object.get("payment_intent")
 
