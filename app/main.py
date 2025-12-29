@@ -52,12 +52,17 @@ def create_user(payload: schemas.UserCreate, db: Session = Depends(get_db)):
     if existing:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="email already exists")
 
+    try:
+        password_hash = hash_password(payload.password)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
     user = models.User(
         firm_name=payload.firm_name,
         name=payload.name,
         email=payload.email,
         phone=payload.phone,
-        password_hash=hash_password(payload.password),
+        password_hash=password_hash,
     )
     db.add(user)
     db.commit()
@@ -70,7 +75,11 @@ def login_user(payload: schemas.UserLogin, db: Session = Depends(get_db)):
     user = db.scalar(select(models.User).where(models.User.email == payload.email))
     if not user or not user.password_hash:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid credentials")
-    if not verify_password(payload.password, user.password_hash):
+    try:
+        is_valid = verify_password(payload.password, user.password_hash)
+    except ValueError:
+        is_valid = False
+    if not is_valid:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid credentials")
     return user
 
